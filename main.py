@@ -12,7 +12,7 @@ from control.blink_click import BlinkClickDetector
 from control.gaze_mapper import GazeMapper
 from control.mouse_controller import MouseController
 from logger_util import log_and_print
-from ui.debug_overlay import draw_calibration_target, draw_focus_point, draw_grid, draw_landmarks, put_hud
+from ui.debug_overlay import draw_calibration_target, draw_direction_vector, draw_focus_point, draw_grid, draw_landmarks, put_hud
 from vision.camera import CameraStream
 from vision.eye_tracker import create_tracker
 
@@ -61,6 +61,9 @@ def main() -> None:
         gain_y=cfg.gaze_gain_y,
         adaptive_smoothing=True,
         direction_dead_zone=cfg.direction_dead_zone,
+        direction_affine_blend=cfg.direction_affine_blend,
+        direction_review_window=cfg.direction_review_window,
+        direction_mismatch_warn_rate=cfg.direction_mismatch_warn_rate,
     )
     mouse = MouseController(cfg.max_cursor_step, cfg.dead_zone_px, sensitivity=cfg.mouse_sensitivity)
     blink = BlinkClickDetector(cfg.blink_ear_threshold, cfg.blink_hold_seconds, cfg.click_cooldown_seconds)
@@ -69,6 +72,7 @@ def main() -> None:
     last_t = time.time()
     blink_event_until = 0.0
     last_gaze_log_t = 0.0
+    last_direction_warn_log_t = 0.0
 
     calibration_targets = [
         ("top_left", "top-left", 0.10, 0.10),
@@ -99,23 +103,42 @@ def main() -> None:
             metrics = tracker.process(frame)
             cursor_xy = pyautogui.position()
             focus_xy = None
+            dir_x, dir_y = 0.0, 0.0
 
             calibration_complete = mapper.is_calibrated and calibration_index >= len(calibration_targets)
 
             if metrics.found_face:
                 dir_x, dir_y = mapper.gaze_to_direction(metrics.gaze_x, metrics.gaze_y)
+                fh, fw = frame.shape[:2]
+
+                # Hybrid remap requested:
+                # - Y focus is trusted -> derive Y direction from focus Y.
+                # - X direction is trusted -> derive X focus from direction X.
+                focus_px_y = int(max(0.0, min(0.999, metrics.gaze_y)) * (fh - 1))
+                focus_norm_y = focus_px_y / max(1.0, float(fh - 1))
+                dir_y = float(np.clip((focus_norm_y - 0.5) * 2.0, -1.0, 1.0))
+
+                dir_norm_x = float(np.clip(dir_x, -1.0, 1.0)) * 0.5 + 0.5
+                focus_px_x = int(dir_norm_x * (fw - 1))
+
+                mismatch_rate, direction_warn = mapper.get_direction_review()
                 now_log_t = time.time()
                 if now_log_t - last_gaze_log_t >= 0.25:
                     log_and_print(f"Gaze direction vector: ({dir_x:.3f}, {dir_y:.3f})")
                     last_gaze_log_t = now_log_t
+                if direction_warn and now_log_t - last_direction_warn_log_t >= 1.0:
+                    log_and_print(
+                        f"Direction review warning: mismatch rate={mismatch_rate:.2f}. Consider recalibration (press 'r')."
+                    )
+                    last_direction_warn_log_t = now_log_t
+
+                cursor_xy = pyautogui.position()
+                focus_xy = (focus_px_x, focus_px_y)
+                metrics.focus_x = focus_px_x
+                metrics.focus_y = focus_px_y
 
                 if calibration_complete and not paused:
                     mouse.move_by_direction(dir_x, dir_y)
-
-                cursor_xy = pyautogui.position()
-                focus_xy = cursor_xy
-                metrics.focus_x = cursor_xy[0]
-                metrics.focus_y = cursor_xy[1]
 
                 if calibration_complete and blink.update(metrics.left_ear, metrics.right_ear) and not paused:
                     mouse.click()
@@ -168,6 +191,8 @@ def main() -> None:
                 dwell_start_t = None
                 dwell_samples.clear()
 
+            mismatch_rate, direction_warn = mapper.get_direction_review()
+
             active_col = int(max(0.0, min(0.999, metrics.gaze_x)) * cfg.grid_cols)
             active_row = int(max(0.0, min(0.999, metrics.gaze_y)) * cfg.grid_rows)
             draw_grid(frame, cfg.grid_cols, cfg.grid_rows, (active_col, active_row))
@@ -210,6 +235,7 @@ def main() -> None:
                 )
 
             draw_focus_point(frame, focus_xy)
+            draw_direction_vector(frame, (dir_x, dir_y))
 
             if not calibration_complete:
                 note = "Calibration in progress"
@@ -220,6 +246,9 @@ def main() -> None:
                 frame,
                 cfg.detector,
                 (metrics.gaze_x, metrics.gaze_y),
+                (dir_x, dir_y),
+                mismatch_rate,
+                direction_warn,
                 cursor_xy,
                 focus_xy,
                 metrics.focus_direction,

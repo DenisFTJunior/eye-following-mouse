@@ -16,11 +16,11 @@ class YoloTracker:
       still validating YOLO availability and mode selection.
     """
 
-    def __init__(self, model_path: str, conf_threshold: float = 0.35) -> None:
+    def __init__(self, model_path: str, conf_threshold: float = 0.35, eye_source: str = "left") -> None:
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self._yolo = self._try_load_yolo(model_path)
-        self._fallback = MediaPipeTracker()
+        self._fallback = MediaPipeTracker(eye_source=eye_source, mirrored_input=True)
 
     def _try_load_yolo(self, model_path: str) -> Optional[object]:
         try:

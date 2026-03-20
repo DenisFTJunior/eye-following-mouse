@@ -29,6 +29,8 @@ class MediaPipeTracker:
     def __init__(
         self,
         *,
+        eye_source: str = "left",
+        mirrored_input: bool = True,
         gaze_alpha: float = 0.35,
         adaptive_min_span_x: float = 0.18,
         adaptive_min_span_y: float = 0.16,
@@ -38,6 +40,9 @@ class MediaPipeTracker:
 
         self._frame_timestamp_ms = 0
         self._backend_note: Optional[str] = None
+        src = (eye_source or "left").strip().lower()
+        self._eye_source = src if src in {"left", "right", "both"} else "left"
+        self._mirrored_input = bool(mirrored_input)
 
         model_path = self._find_task_model_path()
         if model_path is not None:
@@ -85,8 +90,8 @@ class MediaPipeTracker:
         self._gaze_smooth = np.array([0.5, 0.5], dtype=np.float32)
         self._gaze_alpha = float(np.clip(gaze_alpha, 0.02, 0.95))
         # Adaptive normalization bounds to expand limited gaze ranges to near 0..1.
-        self._adaptive_min = np.array([0.35, 0.35], dtype=np.float32)
-        self._adaptive_max = np.array([0.65, 0.65], dtype=np.float32)
+        self._adaptive_min = np.array([0.30, 0.30], dtype=np.float32)
+        self._adaptive_max = np.array([0.70, 0.70], dtype=np.float32)
         self._adaptive_expand_alpha = 0.22
         self._adaptive_shrink_alpha = 0.006
         self._adaptive_min_span = np.array(
@@ -170,27 +175,28 @@ class MediaPipeTracker:
             return horizontal
         return f"{vertical}-{horizontal}"
 
-    def _adaptive_normalize(self, gaze_x: float, gaze_y: float) -> tuple[float, float]:
+    def _adaptive_normalize(self, gaze_x: float, gaze_y: float, update_bounds: bool = True) -> tuple[float, float]:
         value = np.array([gaze_x, gaze_y], dtype=np.float32)
 
-        below = value < self._adaptive_min
-        above = value > self._adaptive_max
+        if update_bounds:
+            below = value < self._adaptive_min
+            above = value > self._adaptive_max
 
-        self._adaptive_min = np.where(
-            below,
-            self._adaptive_min + self._adaptive_expand_alpha * (value - self._adaptive_min),
-            self._adaptive_min + self._adaptive_shrink_alpha * (value - self._adaptive_min),
-        )
-        self._adaptive_max = np.where(
-            above,
-            self._adaptive_max + self._adaptive_expand_alpha * (value - self._adaptive_max),
-            self._adaptive_max + self._adaptive_shrink_alpha * (value - self._adaptive_max),
-        )
+            self._adaptive_min = np.where(
+                below,
+                self._adaptive_min + self._adaptive_expand_alpha * (value - self._adaptive_min),
+                self._adaptive_min + self._adaptive_shrink_alpha * (value - self._adaptive_min),
+            )
+            self._adaptive_max = np.where(
+                above,
+                self._adaptive_max + self._adaptive_expand_alpha * (value - self._adaptive_max),
+                self._adaptive_max + self._adaptive_shrink_alpha * (value - self._adaptive_max),
+            )
 
-        center = 0.5 * (self._adaptive_min + self._adaptive_max)
-        span = np.maximum(self._adaptive_max - self._adaptive_min, self._adaptive_min_span)
-        self._adaptive_min = center - 0.5 * span
-        self._adaptive_max = center + 0.5 * span
+            center = 0.5 * (self._adaptive_min + self._adaptive_max)
+            span = np.maximum(self._adaptive_max - self._adaptive_min, self._adaptive_min_span)
+            self._adaptive_min = center - 0.5 * span
+            self._adaptive_max = center + 0.5 * span
 
         norm = (value - self._adaptive_min) / np.maximum(self._adaptive_max - self._adaptive_min, 1e-6)
         norm = np.clip(norm, 0.0, 1.0)
@@ -255,30 +261,55 @@ class MediaPipeTracker:
             cy = 0.5 * (face_top + face_bottom)
             face_top, face_bottom = cy - 4.0, cy + 4.0
 
+        l_min_x = min(l_outer_f[0], l_inner_f[0])
+        l_max_x = max(l_outer_f[0], l_inner_f[0])
+        r_min_x = min(r_outer_f[0], r_inner_f[0])
+        r_max_x = max(r_outer_f[0], r_inner_f[0])
+        l_min_y = min(l_upper_f[1], l_lower_f[1])
+        l_max_y = max(l_upper_f[1], l_lower_f[1])
+        r_min_y = min(r_upper_f[1], r_lower_f[1])
+        r_max_y = max(r_upper_f[1], r_lower_f[1])
+
         both_iris_x = 0.5 * (li_center_float[0] + ri_center_float[0])
         both_iris_y = 0.5 * (li_center_float[1] + ri_center_float[1])
 
-        gaze_x = self._ratio(both_iris_x, face_left, face_right)
-        gaze_y = self._ratio(both_iris_y, face_top, face_bottom)
+        if self._eye_source == "right":
+            base_x = self._ratio(ri_center_float[0], r_min_x, r_max_x)
+            base_y = self._ratio(ri_center_float[1], r_min_y, r_max_y)
+            span_x = r_max_x - r_min_x
+            span_y = r_max_y - r_min_y
+            fallback_x = self._ratio(li_center_float[0], l_min_x, l_max_x)
+            fallback_y = self._ratio(li_center_float[1], l_min_y, l_max_y)
+        elif self._eye_source == "both":
+            left_x = self._ratio(li_center_float[0], l_min_x, l_max_x)
+            right_x = self._ratio(ri_center_float[0], r_min_x, r_max_x)
+            left_y = self._ratio(li_center_float[1], l_min_y, l_max_y)
+            right_y = self._ratio(ri_center_float[1], r_min_y, r_max_y)
 
-        # Fallback to per-eye ratios if the span collapses (extreme cases only).
-        if not np.isfinite(gaze_x) or face_right - face_left < 2.0:
-            left_x = self._ratio(li_center_float[0], min(l_outer_f[0], l_inner_f[0]), max(l_outer_f[0], l_inner_f[0]))
-            right_x = self._ratio(ri_center_float[0], min(r_outer_f[0], r_inner_f[0]), max(r_outer_f[0], r_inner_f[0]))
-            gaze_x = (left_x + right_x) / 2.0
+            # Use eye-local ratios as primary signal to avoid face-box bias under pose changes.
+            base_x = (left_x + right_x) * 0.5
+            base_y = (left_y + right_y) * 0.5
+            span_x = min(l_max_x - l_min_x, r_max_x - r_min_x)
+            span_y = min(l_max_y - l_min_y, r_max_y - r_min_y)
 
-        if not np.isfinite(gaze_y) or face_bottom - face_top < 2.0:
-            left_y = self._ratio(li_center_float[1], min(l_upper_f[1], l_lower_f[1]), max(l_upper_f[1], l_lower_f[1]))
-            right_y = self._ratio(ri_center_float[1], min(r_upper_f[1], r_lower_f[1]), max(r_upper_f[1], r_lower_f[1]))
-            gaze_y = (left_y + right_y) / 2.0
+            # Blend a small global term to reduce tiny per-eye asymmetry jitter.
+            global_x = self._ratio(both_iris_x, face_left, face_right)
+            global_y = self._ratio(both_iris_y, face_top, face_bottom)
+            base_x = 0.85 * base_x + 0.15 * global_x
+            base_y = 0.85 * base_y + 0.15 * global_y
 
-        # Expand dynamic range to use full 0..1 even when raw values are compressed.
-        gaze_x, gaze_y = self._adaptive_normalize(gaze_x, gaze_y)
+            fallback_x = base_x
+            fallback_y = base_y
+        else:
+            base_x = self._ratio(li_center_float[0], l_min_x, l_max_x)
+            base_y = self._ratio(li_center_float[1], l_min_y, l_max_y)
+            span_x = l_max_x - l_min_x
+            span_y = l_max_y - l_min_y
+            fallback_x = self._ratio(ri_center_float[0], r_min_x, r_max_x)
+            fallback_y = self._ratio(ri_center_float[1], r_min_y, r_max_y)
 
-        # Temporal smoothing to stabilize cursor before mapper smoothing.
-        g_now = np.array([gaze_x, gaze_y], dtype=np.float32)
-        self._gaze_smooth = self._gaze_smooth * (1.0 - self._gaze_alpha) + g_now * self._gaze_alpha
-        gaze_x, gaze_y = float(self._gaze_smooth[0]), float(self._gaze_smooth[1])
+        gaze_x = base_x if np.isfinite(base_x) and span_x >= 2.0 else fallback_x
+        gaze_y = base_y if np.isfinite(base_y) and span_y >= 2.0 else fallback_y
 
         left_ear = self._ear([to_px(i) for i in self.LEFT_EYE_EAR])
         right_ear = self._ear([to_px(i) for i in self.RIGHT_EYE_EAR])
@@ -286,6 +317,20 @@ class MediaPipeTracker:
         ear_balance = 1.0 - np.clip(abs(left_ear - right_ear) / 0.15, 0.0, 1.0)
         openness = np.clip((left_ear + right_ear) / 0.55, 0.0, 1.0)
         focus_confidence = float(np.clip(ear_balance * openness, 0.0, 1.0))
+
+        # Expand dynamic range to use full 0..1 even when raw values are compressed.
+        adaptive_update_ok = focus_confidence >= 0.35 and openness >= 0.45
+        gaze_x, gaze_y = self._adaptive_normalize(gaze_x, gaze_y, update_bounds=adaptive_update_ok)
+
+        # Temporal smoothing to stabilize cursor before mapper smoothing.
+        g_now = np.array([gaze_x, gaze_y], dtype=np.float32)
+        self._gaze_smooth = self._gaze_smooth * (1.0 - self._gaze_alpha) + g_now * self._gaze_alpha
+        gaze_x, gaze_y = float(self._gaze_smooth[0]), float(self._gaze_smooth[1])
+
+        # Main loop flips frames for mirrored preview; undo that for gaze direction.
+        if self._mirrored_input:
+            gaze_x = 1.0 - gaze_x
+
         focus_direction = self._focus_direction(gaze_x, gaze_y)
 
         landmarks: Dict[str, List[Point]] = {

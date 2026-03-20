@@ -23,6 +23,7 @@ Real-time desktop prototype that tracks eye gaze via webcam to move the cursor a
 - Startup 9-point calibration tutorial with auto-capture (dwell) for per-user accuracy.
 - Live focus point estimate (screen XY), direction, and confidence in the HUD.
 - Smooth cursor motion with configurable dead-zone and max-step limits.
+- Direction-review diagnostics that track sign mismatches and warn when mapping quality degrades.
 - HUD with gaze coordinates, EAR values, blink state, and calibration hints.
 - Multi-monitor (virtual desktop) cursor bounds on Windows.
 - Emergency pause (`p`) and quit (`q`) hotkeys.
@@ -134,6 +135,9 @@ Edit `config.py` to tune:
 - `smoothing_alpha`: EMA smoothing factor (0–1)
 - `gaze_gain_x` / `gaze_gain_y`: Sensitivity gain after calibration
 - `direction_dead_zone`: Minimum direction magnitude before movement
+- `direction_affine_blend`: Blend between axis-calibrated and affine-derived direction vectors
+- `direction_review_window`: Rolling window size for direction mismatch review
+- `direction_mismatch_warn_rate`: Warning threshold for direction mismatch ratio
 - `max_cursor_step`: Max cursor movement per frame
 - `mouse_sensitivity`: Overall cursor speed scaling
 - `dead_zone_px`: Dead-zone radius around current cursor
@@ -151,6 +155,23 @@ Edit `config.py` to tune:
 - If downward/upward range feels compressed, lower `mediapipe_adaptive_min_span_y` slightly.
 - If movement is jittery after increasing sensitivity, raise `mediapipe_adaptive_min_span_y` or lower `gaze_gain_y`.
 - After changing mapping/sensitivity, restart and recalibrate (`r`).
+
+### Direction review and mismatch warning
+
+- The mapper now compares baseline axis direction with final smoothed output and tracks mismatch rate in a rolling window.
+- If mismatch rate exceeds `direction_mismatch_warn_rate`, the app logs a warning suggesting recalibration.
+- The HUD line `dir review mismatch` should stay low during stable usage.
+
+### Required validation scenarios (must pass)
+
+1. Horizontal correctness from center (left/right should never mirror).
+2. Vertical correctness from center (up/down should keep correct sign, including bottom row).
+3. Diagonal consistency in all corners (both axis signs should match expected quadrant).
+4. Center stability (5-10s fixation with low drift and low oscillation).
+5. Head-shift resilience (small pose changes should not flip sign).
+6. Dropout recovery (brief tracking loss should recover without jump spikes).
+7. Blink during motion (click path should not corrupt movement direction state).
+8. Recalibration regression (9-point direction correctness should be equal or better after reset).
 
 ---
 

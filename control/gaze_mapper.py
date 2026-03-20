@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -38,6 +39,9 @@ class GazeMapper:
         gain_y: float = 1.45,
         adaptive_smoothing: bool = True,
         direction_dead_zone: float = 0.04,
+        direction_affine_blend: float = 0.65,
+        direction_review_window: int = 90,
+        direction_mismatch_warn_rate: float = 0.28,
     ) -> None:
         self.screen_x = int(screen_x)
         self.screen_y = int(screen_y)
@@ -54,9 +58,15 @@ class GazeMapper:
             dtype=np.float32,
         )
         self._smoothed_direction = np.array([0.0, 0.0], dtype=np.float32)
+        self._neutral_gaze = np.array([0.5, 0.5], dtype=np.float32)
+        self._neutral_alpha = 0.02
         self._direction_dead_zone = float(np.clip(direction_dead_zone, 0.0, 0.35))
+        self._direction_affine_blend = float(np.clip(direction_affine_blend, 0.0, 1.0))
+        self._direction_mismatch_warn_rate = float(np.clip(direction_mismatch_warn_rate, 0.0, 1.0))
         self._calibration: Dict[str, CalibrationPoint] = {}
         self._affine_transform: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._affine_residual_norm = 1.0
+        self._direction_review = deque(maxlen=max(16, int(direction_review_window)))
 
     def add_calibration(self, key: str, gaze_x: float, gaze_y: float, sx: int, sy: int) -> None:
         self._calibration[key] = CalibrationPoint(gaze=(gaze_x, gaze_y), screen=(sx, sy))
@@ -70,6 +80,9 @@ class GazeMapper:
     def reset_calibration(self) -> None:
         self._calibration.clear()
         self._affine_transform = None
+        self._affine_residual_norm = 1.0
+        self._direction_review.clear()
+        self._neutral_gaze = np.array([0.5, 0.5], dtype=np.float32)
 
     def get_target_index(self) -> int:
         for idx, key in enumerate(self.CALIBRATION_ORDER):
@@ -155,8 +168,36 @@ class GazeMapper:
             sol_x, *_ = np.linalg.lstsq(A_arr, bx_arr, rcond=None)
             sol_y, *_ = np.linalg.lstsq(A_arr, by_arr, rcond=None)
             self._affine_transform = (sol_x.astype(np.float32), sol_y.astype(np.float32))
+            pred_x = A_arr @ sol_x
+            pred_y = A_arr @ sol_y
+            err_x = float(np.sqrt(np.mean((pred_x - bx_arr) ** 2)))
+            err_y = float(np.sqrt(np.mean((pred_y - by_arr) ** 2)))
+            diag = max(1.0, float(np.hypot(self.screen_w, self.screen_h)))
+            self._affine_residual_norm = float(np.clip((err_x + err_y) / diag, 0.0, 1.0))
         except Exception:
             self._affine_transform = None
+            self._affine_residual_norm = 1.0
+
+    def _direction_from_affine(self, gaze_x: float, gaze_y: float) -> Optional[tuple[float, float]]:
+        affine_xy = self._apply_affine(gaze_x, gaze_y)
+        if affine_xy is None:
+            return None
+        raw_x, raw_y = affine_xy
+        cx = self.screen_x + 0.5 * (self.screen_w - 1)
+        cy = self.screen_y + 0.5 * (self.screen_h - 1)
+        half_w = max(1.0, 0.5 * (self.screen_w - 1))
+        half_h = max(1.0, 0.5 * (self.screen_h - 1))
+        dir_x = float(np.clip((raw_x - cx) / half_w, -1.0, 1.0))
+        dir_y = float(np.clip((raw_y - cy) / half_h, -1.0, 1.0))
+        return dir_x, dir_y
+
+    def _record_direction_review(self, axis_dir: tuple[float, float], final_dir: tuple[float, float]) -> None:
+        ax, ay = axis_dir
+        fx, fy = final_dir
+        if abs(ax) > 0.08 and abs(fx) > 0.08:
+            self._direction_review.append(int(np.sign(ax) != np.sign(fx)))
+        if abs(ay) > 0.08 and abs(fy) > 0.08:
+            self._direction_review.append(int(np.sign(ay) != np.sign(fy)))
 
     def _apply_affine(self, gaze_x: float, gaze_y: float) -> Optional[tuple[float, float]]:
         if self._affine_transform is None:
@@ -228,27 +269,38 @@ class GazeMapper:
         return x, y
 
     def gaze_to_direction(self, gaze_x: float, gaze_y: float) -> Tuple[float, float]:
+        axis_dir: tuple[float, float]
         if self.is_calibrated:
             min_x, max_x, min_y, max_y, invert_x, invert_y = self._axis_bounds()
 
             center_gaze_x, center_gaze_y = self._calibration["center"].gaze
             dir_x = self._centered_axis_direction(gaze_x, min_x, max_x, center_gaze_x, invert_x)
             dir_y = self._centered_axis_direction(gaze_y, min_y, max_y, center_gaze_y, invert_y)
+            axis_dir = (dir_x, dir_y)
+
+            affine_dir = self._direction_from_affine(gaze_x, gaze_y)
+            if affine_dir is not None:
+                residual_quality = float(np.clip(1.0 - (self._affine_residual_norm * 3.0), 0.0, 1.0))
+                blend = self._direction_affine_blend * residual_quality
+                dir_x = (1.0 - blend) * dir_x + blend * affine_dir[0]
+                dir_y = (1.0 - blend) * dir_y + blend * affine_dir[1]
         else:
-            affine_xy = self._apply_affine(gaze_x, gaze_y)
-            if affine_xy is not None:
-                raw_x, raw_y = affine_xy
-                cx = self.screen_x + 0.5 * (self.screen_w - 1)
-                cy = self.screen_y + 0.5 * (self.screen_h - 1)
-                half_w = max(1.0, 0.5 * (self.screen_w - 1))
-                half_h = max(1.0, 0.5 * (self.screen_h - 1))
-                dir_x = float(np.clip((raw_x - cx) / half_w, -1.0, 1.0))
-                dir_y = float(np.clip((raw_y - cy) / half_h, -1.0, 1.0))
+            affine_dir = self._direction_from_affine(gaze_x, gaze_y)
+            if affine_dir is not None:
+                dir_x, dir_y = affine_dir
             else:
                 norm_x = float(np.clip(gaze_x, 0.0, 1.0))
                 norm_y = float(np.clip(gaze_y, 0.0, 1.0))
-                dir_x = (norm_x - 0.5) * 2.0
-                dir_y = (norm_y - 0.5) * 2.0
+
+                # Learn neutral gaze before calibration so center bias does not force wrong direction.
+                sample = np.array([norm_x, norm_y], dtype=np.float32)
+                delta = np.abs(sample - self._neutral_gaze)
+                if float(delta[0]) <= 0.18 and float(delta[1]) <= 0.18:
+                    self._neutral_gaze = self._neutral_gaze * (1.0 - self._neutral_alpha) + sample * self._neutral_alpha
+
+                dir_x = (norm_x - float(self._neutral_gaze[0])) * 2.0
+                dir_y = (norm_y - float(self._neutral_gaze[1])) * 2.0
+            axis_dir = (dir_x, dir_y)
 
         dir_x = float(np.clip(dir_x * self.gain_x, -1.0, 1.0))
         dir_y = float(np.clip(dir_y * self.gain_y, -1.0, 1.0))
@@ -271,7 +323,16 @@ class GazeMapper:
             alpha = float(slow_alpha + (fast_alpha - slow_alpha) * blend)
 
         self._smoothed_direction = self._smoothed_direction * (1.0 - alpha) + vec * alpha
-        return float(self._smoothed_direction[0]), float(self._smoothed_direction[1])
+        out_x = float(self._smoothed_direction[0])
+        out_y = float(self._smoothed_direction[1])
+        self._record_direction_review(axis_dir, (out_x, out_y))
+        return out_x, out_y
+
+    def get_direction_review(self) -> tuple[float, bool]:
+        if not self._direction_review:
+            return 0.0, False
+        mismatch_rate = float(np.mean(np.asarray(self._direction_review, dtype=np.float32)))
+        return mismatch_rate, mismatch_rate >= self._direction_mismatch_warn_rate
 
     def _centered_axis_direction(
         self,

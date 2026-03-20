@@ -48,6 +48,24 @@ def draw_focus_point(frame, focus_xy: Tuple[int, int] | None):
     cv2.circle(frame, (x, y), 2, (255, 220, 0), -1)
 
 
+def draw_direction_vector(frame, direction_xy: Tuple[float, float], origin_xy: Tuple[int, int] | None = None):
+    h, w = frame.shape[:2]
+    ox = w // 2 if origin_xy is None else int(origin_xy[0])
+    oy = h // 2 if origin_xy is None else int(origin_xy[1])
+    ox = max(0, min(w - 1, ox))
+    oy = max(0, min(h - 1, oy))
+
+    dx = float(max(-1.0, min(1.0, direction_xy[0])))
+    dy = float(max(-1.0, min(1.0, direction_xy[1])))
+    length = int(min(w, h) * 0.18)
+    ex = int(ox + dx * length)
+    ey = int(oy + dy * length)
+
+    cv2.circle(frame, (ox, oy), 12, (40, 40, 40), -1)
+    cv2.circle(frame, (ox, oy), 12, (0, 200, 255), 2)
+    cv2.arrowedLine(frame, (ox, oy), (ex, ey), (0, 200, 255), 3, cv2.LINE_AA, tipLength=0.25)
+
+
 def draw_calibration_target(
     frame,
     target_norm_xy: Tuple[float, float] | None,
@@ -75,6 +93,9 @@ def put_hud(
     frame,
     detector_mode: str,
     gaze_xy: Tuple[float, float],
+    direction_xy: Tuple[float, float],
+    direction_mismatch_rate: float,
+    direction_warn: bool,
     cursor_xy: Tuple[int, int],
     focus_xy: Tuple[int, int] | None,
     focus_direction: str,
@@ -88,8 +109,10 @@ def put_hud(
     lines = [
         f"mode: {detector_mode}",
         f"gaze norm: ({gaze_xy[0]:.3f}, {gaze_xy[1]:.3f})",
+        f"dir vec: ({direction_xy[0]:.3f}, {direction_xy[1]:.3f})",
+        f"dir review mismatch: {direction_mismatch_rate:.2f}{' !' if direction_warn else ''}",
         f"cursor: ({cursor_xy[0]}, {cursor_xy[1]})",
-        f"focus: {focus_xy if focus_xy is not None else 'n/a'} | dir: {focus_direction} | conf: {focus_confidence:.2f}",
+        f"focus(frame): {focus_xy if focus_xy is not None else 'n/a'} | dir: {focus_direction} | conf: {focus_confidence:.2f}",
         f"EAR L/R: {left_ear:.3f} / {right_ear:.3f}",
         f"blink state: {'closed' if blink_closed else 'open'}",
         f"calibration: {calibration_hint}",
