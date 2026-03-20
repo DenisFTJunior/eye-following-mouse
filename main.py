@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = AppConfig(detector=args.detector, camera_index=args.camera_index)
+    window_name = "Gaze Mouse Debug"
 
     screen_x, screen_y, screen_w, screen_h = get_virtual_desktop_bounds()
 
@@ -90,6 +91,9 @@ def main() -> None:
     log_and_print("  p: pause/unpause cursor control")
     log_and_print("  r: restart 9-point calibration")
     log_and_print("Startup calibration: look at each target until it auto-captures")
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     try:
         while True:
@@ -235,7 +239,7 @@ def main() -> None:
                 note,
             )
 
-            cv2.imshow("Gaze Mouse Debug", frame)
+            cv2.imshow(window_name, frame)
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord("q"):
