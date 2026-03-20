@@ -12,7 +12,7 @@ from control.blink_click import BlinkClickDetector
 from control.gaze_mapper import GazeMapper
 from control.mouse_controller import MouseController
 from logger_util import log_and_print
-from ui.debug_overlay import draw_calibration_target, draw_focus_point, draw_grid, draw_landmarks, put_hud
+from ui.debug_overlay import draw_calibration_target, draw_focus_point, draw_gaze_vector, draw_grid, draw_landmarks, put_hud
 from vision.camera import CameraStream
 from vision.eye_tracker import create_tracker
 
@@ -99,11 +99,13 @@ def main() -> None:
             metrics = tracker.process(frame)
             cursor_xy = pyautogui.position()
             focus_xy = None
+            gaze_vector = (0.0, 0.0)
 
             calibration_complete = mapper.is_calibrated and calibration_index >= len(calibration_targets)
 
             if metrics.found_face:
                 dir_x, dir_y = mapper.gaze_to_direction(metrics.gaze_x, metrics.gaze_y)
+                gaze_vector = (dir_x, dir_y)
                 now_log_t = time.time()
                 if now_log_t - last_gaze_log_t >= 0.25:
                     log_and_print(f"Gaze direction vector: ({dir_x:.3f}, {dir_y:.3f})")
@@ -210,6 +212,7 @@ def main() -> None:
                 )
 
             draw_focus_point(frame, focus_xy)
+            draw_gaze_vector(frame, gaze_vector)
 
             if not calibration_complete:
                 note = "Calibration in progress"
@@ -222,6 +225,7 @@ def main() -> None:
                 (metrics.gaze_x, metrics.gaze_y),
                 cursor_xy,
                 focus_xy,
+                gaze_vector,
                 metrics.focus_direction,
                 metrics.focus_confidence,
                 metrics.left_ear,
