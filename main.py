@@ -12,7 +12,7 @@ from control.blink_click import BlinkClickDetector
 from control.gaze_mapper import GazeMapper
 from control.mouse_controller import MouseController
 from logger_util import log_and_print
-from ui.debug_overlay import draw_calibration_target, draw_direction_vector, draw_focus_point, draw_grid, draw_landmarks, put_hud
+from ui.debug_overlay import draw_calibration_target, draw_focus_point, draw_gaze_vector, draw_grid, draw_landmarks, put_hud
 from vision.camera import CameraStream
 from vision.eye_tracker import create_tracker
 
@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = AppConfig(detector=args.detector, camera_index=args.camera_index)
+    window_name = "Gaze Mouse Debug"
 
     screen_x, screen_y, screen_w, screen_h = get_virtual_desktop_bounds()
 
@@ -94,6 +95,9 @@ def main() -> None:
     log_and_print("  p: pause/unpause cursor control")
     log_and_print("  r: restart 9-point calibration")
     log_and_print("Startup calibration: look at each target until it auto-captures")
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     try:
         while True:
@@ -235,7 +239,7 @@ def main() -> None:
                 )
 
             draw_focus_point(frame, focus_xy)
-            draw_direction_vector(frame, (dir_x, dir_y))
+            draw_gaze_vector(frame, gaze_vector)
 
             if not calibration_complete:
                 note = "Calibration in progress"
@@ -251,6 +255,7 @@ def main() -> None:
                 direction_warn,
                 cursor_xy,
                 focus_xy,
+                gaze_vector,
                 metrics.focus_direction,
                 metrics.focus_confidence,
                 metrics.left_ear,
@@ -260,7 +265,7 @@ def main() -> None:
                 note,
             )
 
-            cv2.imshow("Gaze Mouse Debug", frame)
+            cv2.imshow(window_name, frame)
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord("q"):
