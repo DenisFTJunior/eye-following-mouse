@@ -108,11 +108,13 @@ def main() -> None:
             cursor_xy = pyautogui.position()
             focus_xy = None
             dir_x, dir_y = 0.0, 0.0
+            gaze_vector = (0.0, 0.0)
 
             calibration_complete = mapper.is_calibrated and calibration_index >= len(calibration_targets)
 
             if metrics.found_face:
                 dir_x, dir_y = mapper.gaze_to_direction(metrics.gaze_x, metrics.gaze_y)
+                gaze_vector = (dir_x, dir_y)
                 fh, fw = frame.shape[:2]
 
                 # Hybrid remap requested:
@@ -121,6 +123,7 @@ def main() -> None:
                 focus_px_y = int(max(0.0, min(0.999, metrics.gaze_y)) * (fh - 1))
                 focus_norm_y = focus_px_y / max(1.0, float(fh - 1))
                 dir_y = float(np.clip((focus_norm_y - 0.5) * 2.0, -1.0, 1.0))
+                gaze_vector = (dir_x, dir_y)
 
                 dir_norm_x = float(np.clip(dir_x, -1.0, 1.0)) * 0.5 + 0.5
                 focus_px_x = int(dir_norm_x * (fw - 1))
